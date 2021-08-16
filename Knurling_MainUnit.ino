@@ -1,10 +1,11 @@
 #include <WiFi.h>
 #include <WebSocketServer.h>
 #include <ESP32SharpIR.h>
-#include <time.h>
 
 //포트 번호 정의(default 80)
 WiFiServer server(80);
+
+//WebSocketServer 라이브러리 사용을 위한 객체 선언
 WebSocketServer webSocketServer;
 
 
@@ -14,34 +15,15 @@ ESP32SharpIR sensor( ESP32SharpIR::GP2Y0A21YK0F, 33);
 int count = 0;
 String machine_name = "LetPullDown";
 static int distance;
-static bool time_flag;
-static bool flag_up = false;
-static bool flag_down = false;
+static bool flag_up;
+static bool flag_down;
+static bool flag_machine;
 static String data;
 
-const char* ntpServer = "pool.ntp.org";
-uint8_t timeZone = 9; 
-uint8_t summerTime = 0; // 3600 
 
 const char* ssid = "KT_GiGA_2G_Wave2_DC75";
 const char* password = "db89kc5373";
 
-
-// 시간 관련 구조체에서 현재 시간과 관련된 정보인 date 추출
-void printLocalTime() {
-  struct tm timeinfo; 
-  if(!getLocalTime(&timeinfo)){
-    Serial.println("Failed to obtain time"); 
-    return; 
-  } 
-  String year = String(timeinfo.tm_year+1900);
-  String month = String(timeinfo.tm_mon+1);
-  String day = String(timeinfo.tm_mday);
-  String hour = String(timeinfo.tm_hour);
-  String minute = String(timeinfo.tm_min);
-  String sec = String(timeinfo.tm_sec);
-  String date = year + "," + month + "." + day + " " + hour + ":" + minute + ":" + sec;
-}
 
 void setup(){
 
@@ -54,68 +36,84 @@ void setup(){
   //와이파이 연결
   WiFi.begin(ssid, password);
   while (WiFi.status() != WL_CONNECTED) {
-    delay(100);
-    Serial.println("Connecting to WiFi...");
+   delay(100);
+   Serial.println("Connecting to WiFi...");
   }
   Serial.println("Connected to the WiFi network");
   Serial.println(WiFi.localIP());
-  
-  //시간 재설정 및 정보 가져오기
-  configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
-  
-  //esp32 서버 시작
-  server.begin()
+
+ 
+  // esp32 서버 시작
+  server.begin();
   delay(500);
-  time_flag = true
 }
 
 void loop(){
+  // 서버가 현재 사용 가능한 상태이면 클라이언트 요청 받을 준비
   WiFiClient client = server.available();
-  
-  if (client.connected() && webSocketServer.handshake(client)) {
 
-    while (client.connected()) {
+  // 클라이언트랑 연결되고, 소켓끼리 통신 가능 여부 확인
+  if (client.connected() && webSocketServer.handshake(client)) {
+    //클라이언트와 연결되어있는 동안, 클라이언트에서 보내는 정보를 받음 
+    while (client.connected()){
       data = webSocketServer.getData();
-      if(data == "true"){
-        if(time_flag==true){
-          printLocalTime();
-          time_flag=false;
-        }
-        distance = sensor.getDistance();
-        webSocket.Server.sendData(data);
-        if (distance<=20){
-          flag_up=true;
-        } //플레이트 까지의 거리가 20cm 를 넘을 때, flag_up을 true로 설정.
-        
-        if ((flag_up==true) && (40<=distance)){
-          flag_down=true;
-        } //플레이트 까지의 거리가 40cm 를 넘을 때, flag_down를 true로 설정.
+      //클라이언트에서 받아지는 값이 NULL이 아니기 위해 조건을 걸어서 데이터를 처리
+      if(data.length() > 0){
+        //받아진 데이터가 "true"라는 String일 경우, 무한 루프 속에 갇힘(실시간 거리값에 의한 연산만 이루어질 수 있도록)
+        if(data == "true"){
+          //운동 기구에 대한 정보가 한 번만 보내질 수 있도록 flag_machine을 플래그로 박아두고 한 번만 보내지도록 코딩
+          while(true){
+            if(flag_machine == false){
+                webSocketServer.sendData("운동 기구 : " + machine_name);
+                flag_machine = true;
+            }    
+            distance = sensor.getDistance();
+            delay(100);
+            Serial.print("거리 : ");
+            Serial.println(distance);
   
-        if ((flag_up==true) && (flag_down==true))//flag_up과 flag_down가 모두 true일 때, count를 증가시킴.
-        {
-          count+=1;
-          Serial.print(" Count  :: ");
-          Serial.print(count);
-          Serial.println();   
-      
-          flag_up=false; //flag_up과 flag_down는 false로 초기화
-          flag_down=false;
-      
-          Serial.println("ESP32 send data to TCP Client");
-          webSocket.Server.sendData("운동 일자 : " + date + "운동 기구" + machine_name + "횟수 : " + String(count));
+            //플레이트 까지의 거리가 20cm 를 넘을 때, flag_up을 true로 설정.
+            if (distance<=20){
+              flag_up=true;
+            }
+            
+            //플레이트 까지의 거리가 40cm 를 넘을 때, flag_down를 true로 설정.
+            if ((flag_up==true) && (40<=distance)){
+              flag_down=true;
+            }
+            
+            //flag_up과 flag_down가 모두 true일 때, count를 증가시킴.
+            if ((flag_up==true) && (flag_down==true)){
+              count += 1;
+              Serial.print(count);
+              Serial.println();  
+              
+              flag_up=false; //flag_up과 flag_down는 false로 초기화
+              flag_down=false;
+
+              Serial.println("ESP32 send data to TCP Client");
+              webSocketServer.sendData(" 횟수 : " + String(count));
+              continue;
+            }
+
+            //안드로이드에서 "ws.close()" 즉, 먼저 TCP 연결 끊는 코드 작성 후 이 조건문이 실행되는지 확인해야함
+            if(!client.connected()){
+              Serial.println("연결 끊어짐");
+              continue;
+            }
+          }
         }
-        delay(10);
-      }
-      else{
-        count = 0;
-        flag_up = false;
-        flag_down = false;
-        time_flag = true;
+        // 스마트폰을 통해 받아진 데이터가 false일 경우, 모든 데이터들을 초기화
+        else{
+          Serial.println("스마트폰에게 false를 전달 받음");
+          count = 0;
+          flag_up = false;
+          flag_down = false;
+          flag_machine = false;
+        }
       }
     }
     Serial.println("The client disconnected");
-
-    delay(10);
   }
   delay(10);
 }
